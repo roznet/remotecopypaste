@@ -36,8 +36,9 @@ import time
 import argparse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib import parse
-import cgi
-from requests import Session, Request
+from email.message import EmailMessage
+from multipart import MultipartError, parse_form_data
+from requests import Session
 import pwd
 import json
 import sys
@@ -152,23 +153,27 @@ class RemoteStashItem:
 
     def info_from_headers(headers):
         info = {}
+        # Replace functionality of deprecated cgi.parse_header()
+        msg = EmailMessage()
         if 'content-type' in headers:
-            ctype, pdict = cgi.parse_header(headers['content-type'])
+            msg['content-type'] = headers['content-type']
+            ctype, charset = msg.get_content_type(), msg.get_content_charset(failobj=None)
         else:
-            ctype, pdict = 'application/octet-stream', {}
-            
-        info['content-type'] = ctype
+            ctype, charset = 'application/octet-stream', {}
         
-        encoding = None
-        if 'charset' in pdict:
-            info['encoding'] = pdict['charset']
+        info['content-type'] = ctype
+        info['encoding'] = None
+        if charset:
+            info['encoding'] = charset
         elif ctype.startswith( 'text/' ):
             info['encoding'] = 'utf-8'
         
         if 'content-disposition' in headers:
-            cdisp, ddict = cgi.parse_header(headers['content-disposition'] )
-            if 'filename' in ddict:
-                info['filename'] = ddict['filename']
+            msg['content-disposition'] = headers['content-disposition']
+            cdisp, filename = msg.get_content_disposition(), msg.get_filename(failobj=None)
+            info['content-disposition'] = cdisp
+            if filename:
+                info['filename'] = filename
 
         return info
     
@@ -736,26 +741,53 @@ class RemoteStashServer(BaseHTTPRequestHandler):
             self.headers_dict[ k.lower() ] = v;
         self.filename = None
 
+        # Replace functionality of deprecated cgi.parse_header()
+        msg = EmailMessage()
         if 'Content-Type' in self.headers:
-            ctype, pdict = cgi.parse_header(self.headers['content-type'])
+            msg['content-type'] = self.headers['content-type']
+            ctype, pdict = msg.get_content_type(), msg['content-type'].params
         else:
             ctype = 'application/octet-stream'
 
         if 'content-disposition' in self.headers:
-            cdisp, ddict = cgi.parse_header(self.headers['content-disposition'] )
-            if 'filename' in ddict:
-                self.filename = ddict['filename']
+            msg['content-disposition'] = self.headers['content-disposition']
+            cdisp, filename = msg.get_content_disposition(), msg.get_filename(failobj=None)
+            self.info['content-disposition'] = cdisp
+            if filename:
+                self.filename = filename
             
         if ctype == 'multipart/form-data':
             pdict['boundary'] = bytes(pdict['boundary'], 'utf-8')
             pdict['content-length'] = int(self.headers['Content-Length'])
-            form = cgi.FieldStorage( fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD':'POST', 'CONTENT_TYPE':self.headers['Content-Type'], })
-            if 'file' in form:
-                record = form['file']
-                self.filename = record.filename
-                self.body = record.file.read()
+            # Replace functionality of deprecated cgi.FieldStorage() with multipart.parse_form_data()
+            try:
+                (forms, files) = parse_form_data({'REQUEST_METHOD':'POST', 'CONTENT_TYPE':self.headers['Content-Type'], },
+                  charset="utf8", strict=False, stream=self.rfile, content_length=pdict['content-length'], boundary=pdict['boundary'])
+            except MultipartError as e:
+                match e:
+                    case MultipartError("Boundary does not fit into buffer_size."):
+                        response_code = 500
+                    case MultipartError("Memory limit reached."):
+                        response_code = 500
+                    case MultipartError("Disk limit reached."):
+                        response_code = 500
+                    case MultipartError("Request too big. Increase MAXMEM."):
+                        response_code = 500
+                    case _:
+                        response_code = 400
+                self.respond( response_code, {}, str(e), log_message=f'Error: {e}')
+                return
+            except Exception as e:
+                self.respond( 500, {}, 'Error', log_message=f'Error: {e}' )
+                return
+            if len(files) > 0:
+                # Only handle the first file found
+                filename = files.keys()[0]
+                record = files[filename]
+                self.filename = filename
+                self.body = record.value()
                 self.content_length = len(self.body)
-                self.content_type = record.type
+                self.content_type = record.content_type
             else:
                 self.body = None
                 self.content_length = 0
