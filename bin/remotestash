@@ -893,10 +893,19 @@ class RemoteStash:
             # certificated created with
             # Will check consistency with the certificate used on other server/app
             #  openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout remotestash-key.pem -out remotestash-cert.pem
-            server.socket = ssl.wrap_socket( server.socket,
-                                             keyfile = os.path.expanduser( '~/.remotestash/remotestash-key.pem' ),
-                                             certfile = os.path.expanduser( '~/.remotestash/remotestash-cert.pem' ),
-                                             server_side = True )
+            # Replace deprecated ssl.wrap_socket() with ssl.SSLContext.wrap_socket() for Python 3.7 and later
+            python_ver = (sys.version_info[0], sys.version_info[1])
+            if python_ver >= (3,7):
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.check_hostname = False
+                context.load_cert_chain( os.path.expanduser( '~/.remotestash/remotestash-cert.pem' ),
+                                         os.path.expanduser( '~/.remotestash/remotestash-key.pem' ) )
+                server.socket = context.wrap_socket( server.socket, server_side=True )
+            else:
+                server.socket = ssl.wrap_socket( server.socket,
+                                                 keyfile = os.path.expanduser( '~/.remotestash/remotestash-key.pem' ),
+                                                 certfile = os.path.expanduser( '~/.remotestash/remotestash-cert.pem' ),
+                                                 server_side = True )
         else:
             print( f"Couldn't find certificate and key files, please copy the files in the certs directory into ~/.remotestash to continue")
             exit(1)
