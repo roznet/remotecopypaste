@@ -375,7 +375,7 @@ class RemoteStashLocal:
         remove asset for the item, will check if asset not used by another item
         before removing
         '''
-        assetname = item.info['assetname']
+        assetname = item.info['assetname'] if 'assetname' in item.info else ''
         remove=True
         # don't remove if asset used by another item
         for other in self.contents['items'][:-1]:
