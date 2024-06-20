@@ -899,8 +899,17 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 self.filename = filename
             
         if ctype == 'multipart/form-data':
-            pdict['boundary'] = bytes(pdict['boundary'], 'utf-8')
-            pdict['content-length'] = int(self.headers['Content-Length'])
+            if self.verbose > 2:
+                self.log_message(f'ctype: {ctype}')
+                self.log_message(f'pdict: {pdict}')
+                self.log_message(f'rfile: {self.rfile}') if self.rfile else self.log_message('rfile: None')
+            # boundary_bytes = bytes(pdict['boundary'], 'utf-8') ## Now handled by multipart.parse_form_data()
+            if 'Content-Length' in self.headers and self.headers['Content-Length']:
+                content_length_int = int(self.headers['Content-Length'])
+            else:
+                content_length_int = -1
+            if self.verbose > 1:
+                self.eprint( f'Content-Length from self.headers: {content_length_int}')
             # Replace functionality of deprecated cgi.FieldStorage() with multipart.parse_form_data()
             try:
                 (forms, files) = parse_form_data({'REQUEST_METHOD':'POST', 'CONTENT_TYPE':self.headers['Content-Type'], },
@@ -916,16 +925,37 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                     case MultipartError("Request too big. Increase MAXMEM."):
                         response_code = 500
                     case _:
+                        # All other MultiPartError types are due to bad client requests
                         response_code = 400
-                self.respond( response_code, {}, str(e), log_message=f'Error: {e}')
+                self.log_error(f'Error: {e}')
+                self.respond( response_code, {}, str(type(e).__name__), log_message=f'Error: {e}')
                 return
             except Exception as e:
-                self.respond( 500, {}, 'Error', log_message=f'Error: {e}' )
+                self.log_error(f'Error: {e}')
+                self.respond( 500, {}, str(type(e).__name__), log_message=f'Error: {e}' )
                 return
             if len(files) > 0:
                 # Only handle the first file found
-                filename = files.keys()[0]
-                record = files[filename]
+                if self.verbose > 1:
+                    self.eprint( f'Found {len(files)} files' )
+                for k in files.keys():
+                    if self.verbose > 2:
+                        self.eprint( f'Found file key: {k}' )
+                        self.eprint( f'Found file: {files[k]}')
+                        self.eprint( f'Found filename: {files[k].filename}')
+                        self.eprint( f'size: {files[k].size}')
+                        self.eprint( f'Content-Type: {files[k].content_type}')
+                        self.eprint( f'Charset: {files[k].charset}')
+                        self.eprint( f'Content-Length: {files[k].content_length}')
+                        self.eprint( f'Content-Disposition: {files[k].disposition}')
+                        if self.verbose > 3:
+                            self.eprint( f'raw data: {files[k].raw}')
+                    filename = files[k].filename
+                    record = files[k] # MultipartPart
+                if self.verbose > 1:
+                    self.eprint( f"files.keys()['file']: {files['file']}" )
+                # filename = files.keys()[0]
+                # record = files[filename]
                 self.filename = filename
                 self.body = record.value()
                 self.content_length = len(self.body)
@@ -947,9 +977,9 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
 
         if self.content_length > 0:
             if self.filename:
-                print( f'Received {self.content_length} bytes, content-type: {self.content_type} filename: {self.filename}' )
+                self.log_message( f'Received {self.content_length} bytes, content-type: {self.content_type} filename: {self.filename}' )
             else:
-                print( f'Received {self.content_length} bytes, content-type: {self.content_type}' )
+                self.log_message( f'Received {self.content_length} bytes, content-type: {self.content_type}' )
 
     def respond_item(self,item):
         if item:
