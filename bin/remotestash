@@ -571,7 +571,7 @@ class RemoteStashClient:
             if self.content_type:
                 headers[ 'Content-Type'] =  self.content_type
             if self.verbose:
-                print( 'starting POST {}  data {}'.format(url,self.filename,self.content_type) )
+                print( 'starting POST {}  data {}'.format(url,self.filename,) )
             response = self.session.post( url, verify=False, data = data, headers = headers )
         return response
 
@@ -749,28 +749,28 @@ class RemoteStashServer(BaseHTTPRequestHandler):
 
         # Replace functionality of deprecated cgi.parse_header()
         msg = EmailMessage()
-        # if self.verbose > 1:
-            # self.log_message("breakdown_request(): Handling request")
-        # elif self.verbose > 2:
-            # self.log_message(f'Headers: {self.headers}')
+        if self.verbose > 1:
+            self.log_message("breakdown_request(): Handling request")
+        elif self.verbose > 2:
+            self.log_message(f'Headers: {self.headers}')
 
         if 'Content-Type' in self.headers:
-            # if self.verbose > 1:
-                # self.log_message(f'Content-Type: {self.headers["content-type"]}')
+            if self.verbose > 1:
+                self.log_message(f'Content-Type: {self.headers["content-type"]}')
             msg['content-type'] = self.headers['content-type']
             ctype, pdict = msg.get_content_type(), msg['content-type'].params
-            # if self.verbose > 2:
-                # self.log_message(f'pdict: {pdict}')
+            if self.verbose > 2:
+                self.log_message(f'pdict: {pdict}')
         else:
             ctype = 'application/octet-stream'
 
         if 'content-disposition' in self.headers:
-            # if self.verbose > 2:
-                # self.log_message(f'Content-Disposition: {self.headers["content-disposition"]}')
+            if self.verbose > 2:
+                self.log_message(f'Content-Disposition: {self.headers["content-disposition"]}')
             msg['content-disposition'] = self.headers['content-disposition']
             cdisp, filename = msg.get_content_disposition(), msg.get_filename(failobj=None)
-            # if self.verbose > 2:
-                # self.log_message(f'cdisp: {cdisp}, filename: {filename}')
+            if self.verbose > 2:
+                self.log_message(f'cdisp: {cdisp}, filename: {filename}')
             self.info['content-disposition'] = cdisp
             if filename:
                 self.filename = filename
