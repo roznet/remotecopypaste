@@ -919,8 +919,9 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 self.eprint( f'Content-Length from self.headers: {content_length_int}')
             # Replace functionality of deprecated cgi.FieldStorage() with multipart.parse_form_data()
             try:
-                (forms, files) = parse_form_data({'REQUEST_METHOD':'POST', 'CONTENT_TYPE':self.headers['Content-Type'], },
-                  charset="utf8", strict=False, stream=self.rfile, content_length=pdict['content-length'], boundary=pdict['boundary'])
+                (forms, files) = parse_form_data({'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': self.headers['content-type'], 
+                                                  'wsgi.input': self.rfile, 'CONTENT_LENGTH': content_length_int },
+                                                  charset="utf8", strict=False)
             except MultipartError as e:
                 match e:
                     case MultipartError("Boundary does not fit into buffer_size."):
@@ -964,7 +965,7 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 # filename = files.keys()[0]
                 # record = files[filename]
                 self.filename = filename
-                self.body = record.value()
+                self.body = record.raw
                 self.content_length = len(self.body)
                 self.content_type = record.content_type
             else:
