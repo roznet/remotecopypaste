@@ -23,6 +23,8 @@
 #  
 #
 
+__version__ = '2.0.0'
+
 from zeroconf import ServiceBrowser, Zeroconf, ServiceInfo
 import hashlib
 import mimetypes
@@ -734,10 +736,81 @@ class RemoteStashServer(RemoteStashSocketServer):
             self.eprint(f'Calling: {super().__class__.__name__}.__init__({server_address}, {self.RequestHandlerClass}, {stash})')
         super().__init__(server_address, self.RequestHandlerClass, stash)
 
-class RemoteStashServer(BaseHTTPRequestHandler):
+class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
     '''
     Implement an https server that will process the remotestash protocol using a local stash
     '''
+    DEFAULT_ERROR_MESSAGE_FORMAT = "" # Empty to avoid python bytes string (b"") in the response
+    DEFAULT_ERROR_CONTENT_TYPE = "application/json;charset=utf-8"
+    DEFAULT_ERROR_JSON_FORMAT = """{"code": %(code)d, "message": %(message)s, "explanation": %(explain)s}"""
+    DEFAULT_OK_CONTENT_TYPE = "application/json;charset=utf-8"
+    DEFAULT_OK_JSON_FORMAT = """{"code": %(code)d, "message": %(message)s, "explanation": %(explain)s}"""
+
+
+    HTTP_STATUS_DESCRIPTIONS = { v: v.description for v in http.HTTPStatus.__members__.values() }
+    # Example of how to see all possible HTTPStatus descriptions:
+    #  print(f'{[ HTTPStatus.__members__[thing].description for thing in things ] }
+
+    def eprint(self, *args, **kwargs):
+        """
+        A print function to print directly to stderr.
+
+        Bypasses the machinery of the log_message() method, which replaces
+        Unicode control characters with escaped hex before writing the output to
+        stderr.
+
+        This allows us to print the traceback of an exception to stderr without
+        string mangling and newlines included.
+        """
+        if self.verbose > 3:
+            print(self, *args, file=sys.stderr, **kwargs)
+        else:
+            print(*args, file=sys.stderr, **kwargs)
+
+    def sanitize_data(self, data):
+        """
+        Sanitize data for printing to stderr.
+
+        Replace any Unicode control characters with escaped hex.
+        """
+        self.eprint( f'type(data): {type(data)}' )
+        _type = type(data)
+        match _type:
+            case builtins.bytes:
+                return ''.join(
+                    c if c.isprintable() else fr'\x{ord(chr(c)):02x}'
+                    for c in data.decode('utf-8', 'replace')
+                )
+            case builtins.str:
+                return ''.join(
+                    c if c.isprintable() else fr'\x{ord(c):02x}'
+                    for c in data
+                )
+            case _:
+                return ''
+
+    def __init__(self, *args, stash):
+        self.server_version = "RemoteStashServer/" + __version__
+        self.error_message_format = self.DEFAULT_ERROR_MESSAGE_FORMAT
+        self.error_content_type = self.DEFAULT_ERROR_CONTENT_TYPE
+        # Pull our verbosity level and args from RemoteStash object
+        self.verbose = stash.verbose
+        self.args = stash.args
+        if self.verbose > 3:
+            self.eprint( f'{self.__class__.__name__}__init__({self}, {args}, {stash})' )
+            # self.eprint( f'self.__dir__() = {self.__dir__()}' )
+            # self.eprint( f'__init__(self, {args})' )
+            # self.eprint( f'stash.__dir__() = {stash.__dir__()}' )
+        # Initialize to None
+        self.body = None
+        self.content_type = None
+        self.content_length = None
+        self.filename = None
+        # Call the base class BaseHTTPRequestHandler constructor method
+        # Don't pass our custom stash arg now that we've stored what we wanted
+        # in self
+        super().__init__(*args)
+
     def push(self):
         if self.body is None:
             pass
@@ -955,7 +1028,10 @@ class RemoteStash:
             name = f'{advertiser.get_name()} RemoteStash'
         advertiser.start_advertisement(name)
         port = advertiser.port
-        server = HTTPServer((advertiser.ip, port), RemoteStashServer)
+        # Pass in this RemoteStash instance to the server class, so it can access the self.verbose attribute
+        server = RemoteStashServer((advertiser.ip, port), self)
+        if self.verbose > 1:
+            print( f'Server object: {server}')
         proto = 'http'
         if os.path.isfile( os.path.expanduser( '~/.remotestash/remotestash-key.pem' ) ):
             proto = 'https'
