@@ -821,7 +821,14 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
         if self.filename:
             info['filename'] = self.filename
         item = RemoteStashItem.from_data( self.body, info )
-        stash.push( item )
+        try:
+            stash.push( item )
+        except Exception as e:
+            if self.verbose > 1:
+                self.log_error('%s: %s', type(e).__name__, str(e))
+                self.eprint( f'Error: \n{traceback.format_exc()}' )
+            self.respond( 500, {}, f'{type(e).__name__}: {str(e)}', log_message=f'Error: {str(type(e).__name__)}: {str(e)} ocurred.\n{traceback.format_exc()}' )
+            return
         self.respond( 200, { 'content-type' : 'application/json; charset=utf-8' }, json.dumps({'success':1}), log_message=f'Received: {item}' )
 
     def pull(self):
