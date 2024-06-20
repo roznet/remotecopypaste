@@ -1000,9 +1000,69 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
             self.respond( 200, {}, None )
             
     def respond(self,response_value, headers, content, log_message=None ):
-        self.send_response(response_value)
-        if log_message:
-            print( log_message )
+        http_status_message = http.client.responses[response_value] if response_value in http.client.responses else 'Unknown'
+        http_status_description = self.HTTP_STATUS_DESCRIPTIONS[response_value] if response_value in self.HTTP_STATUS_DESCRIPTIONS else 'Unknown'
+
+        self.eprint(f'len(content): {len(content)}')
+        if len(content) > 100:
+            sanitized_content = self.sanitize_data(content[:100])
+        else:
+            sanitized_content = self.sanitize_data(content)
+        self.eprint(f'sanitized_content: {sanitized_content}')
+
+        self.close_connection = True
+        err_json_response = None
+        # ok_json_response = None
+        if response_value < 200:
+            # Informational response
+            self.send_response(response_value, message=http_status_message)
+        elif (response_value >= 200 and response_value < 400 and
+            response_value not in (http.client.NO_CONTENT,
+                                   http.client.RESET_CONTENT,
+                                   http.client.NOT_MODIFIED)):
+            # Send non-error response to client
+            # (success, or redirection)
+            if log_message:
+                explanation = log_message
+            else:
+                explanation = http_status_description
+            ## Possible enhancement: Implement JSON response & receive in iOS client?
+            ## (not sure how binary data would be handled in JSON response)
+            # ok_json_response = (self.DEFAULT_OK_JSON_FORMAT % 
+            #             {
+            #             'code': int(response_value),
+            #             'message': json.dumps(content),
+            #             'explain': json.dumps(explanation)
+            #             }
+            #         )
+            # self.send_response(response_value, message=http_status_message)
+            self.send_response(response_value, message=content)
+            # Only for logging below
+            msg = f'Response: {http_status_message} - {sanitized_content}'
+        else: # Error response
+            if self.verbose > 2:
+                # Send developer-friendly error message, but only when in very very verbose mode
+                # Avoid running server in very verbose mode in production, as it
+                # may leak stacktraces and other sensitive information to clients.
+                msg = f'Response: {http_status_message} - {sanitized_content}'
+                explanation = log_message
+            else:
+                # Send the generic HTTP status message and description
+                msg = f'Response: {http_status_message}'
+                explanation = http_status_description
+            # Run everything except the response_value through json.dumps() to
+            # escape special characters
+            err_json_response = (self.DEFAULT_ERROR_JSON_FORMAT % 
+                                 {
+                                    'code': int(response_value),
+                                    'message': json.dumps(msg),
+                                    'explain': json.dumps(explanation)
+                                 }
+                                )
+            # Note: We can not use send_error() here, as it will send HTML escaped character entities
+            #      and we want to send raw JSON. We will have to manually send the response.
+            self.send_response(response_value, message=http_status_message)
+            self.send_header('Content-Type', self.DEFAULT_ERROR_CONTENT_TYPE)
         ctype = None
         if headers:
             for header,value in headers.items():
@@ -1011,12 +1071,17 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                     
                 self.send_header(header,value)
         self.end_headers()
-        
-        if content:
-            self.wfile.write(content if isinstance(content,bytes) else content.encode( 'utf-8' ) )
-            print( f'Response: {response_value}, {len(content)} bytes, {headers}' )
-        else:
-            print( f'Response: {response_value}' )
+        if err_json_response:
+            self.wfile.write(err_json_response.encode('utf-8', 'replace'))
+        ## Possible enhancement: Implement JSON response & receive in iOS client?
+        # if ok_json_response:
+        #     self.wfile.write(ok_json_response.encode('utf-8', 'replace'))
+        if content and not err_json_response:
+            self.wfile.write(content if isinstance(content,bytes) else content.encode( 'utf-8', 'replace' ) )
+        # Always log what we responded to the client with, regardless of verbosity level
+        self.eprint(f'{sanitized_content}')
+        self.log_message( f'Can I Log A {explanation} {headers}' )
+        # self.log_message( f'Response: {response_value} - {msg} - {explanation}, {len(content) if content else 0} bytes, {headers}' )
         
 class RemoteStash:
     def __init__(self,args=None):
