@@ -317,6 +317,12 @@ class RemoteStashLocal:
     The information of the content of the stash will be saved as contents.json
     will support pull,push,last,status operations
     '''
+    def eprint(self, *args, **kwargs):
+        if self.verbose > 3:
+            # print(self, *args, file=sys.stderr, **kwargs)
+            print(f'{self.__class__.__name__}', *args, file=sys.stderr, **kwargs)
+        else:
+            print(*args, file=sys.stderr, **kwargs)
     
     def __init__(self,args):
         self.args = args
@@ -452,7 +458,7 @@ class RemoteStashLocal:
         item.save_asset(self.location_assets)
 
         if len(self.contents['items']) and self.contents['items'][-1]['assetname'] == item.info['assetname']:
-            if True: #self.verbose:
+            if self.verbose > 0:
                 print( f'Skipping adding duplicate of last {item}' )
             return
         
@@ -487,7 +493,7 @@ class RemoteStashClient:
         self.cmd = cmd
         self.stash = stash
         self.args = stash.args
-        if self.args.verbose:
+        if self.args.verbose > 0:
             self.verbose = True
         else:
             self.verbose = False
@@ -743,15 +749,28 @@ class RemoteStashServer(BaseHTTPRequestHandler):
 
         # Replace functionality of deprecated cgi.parse_header()
         msg = EmailMessage()
+        if self.verbose > 1:
+            self.log_message("breakdown_request(): Handling request")
+        elif self.verbose > 2:
+            self.log_message(f'Headers: {self.headers}')
+
         if 'Content-Type' in self.headers:
+            if self.verbose > 1:
+                self.log_message(f'Content-Type: {self.headers["content-type"]}')
             msg['content-type'] = self.headers['content-type']
             ctype, pdict = msg.get_content_type(), msg['content-type'].params
+            if self.verbose > 2:
+                self.log_message(f'pdict: {pdict}')
         else:
             ctype = 'application/octet-stream'
 
         if 'content-disposition' in self.headers:
+            if self.verbose > 2:
+                self.log_message(f'Content-Disposition: {self.headers["content-disposition"]}')
             msg['content-disposition'] = self.headers['content-disposition']
             cdisp, filename = msg.get_content_disposition(), msg.get_filename(failobj=None)
+            if self.verbose > 2:
+                self.log_message(f'cdisp: {cdisp}, filename: {filename}')
             self.info['content-disposition'] = cdisp
             if filename:
                 self.filename = filename
@@ -1063,7 +1082,7 @@ if __name__ == "__main__":
     parser.add_argument( '-c', '--content-type', help='content type' )
     parser.add_argument( '-l', '--local', action='store_true', help='use local stash' )
     parser.add_argument( '-n', '--name', help='name for service' )
-    parser.add_argument( '-v', '--verbose', action='store_true', help='verbose output' )
+    parser.add_argument( '-v', '--verbose', action='count', default=False, help='verbose output. Pass multiple times to be very verbose and display more debug info. Supports up to 4 -v flags.' )
     parser.add_argument( '-p', '--port', help='port to use if not set will use a free port' )
     parser.add_argument( '-t', '--timeout', help='timeout for searching for a RemoteStash on the network', default=5.0, type=float )
     parser.add_argument( 'file',nargs='?', help='file name to read or save, empty or - for stdout/stdin' )
