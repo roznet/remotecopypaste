@@ -34,7 +34,7 @@ import os
 from contextlib import closing
 import time
 import argparse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib import parse
 from email.message import EmailMessage
 from multipart import MultipartError, parse_form_data
@@ -43,6 +43,10 @@ import pwd
 import json
 import sys
 from pprint import pprint
+import traceback
+import http.client
+import socketserver
+import builtins
 
 # certificated created with
 #  openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout remotestash-key.pem -out remotestash-cert.pem
@@ -683,7 +687,53 @@ class RemoteStashServerAdvertiser:
         zeroconf = Zeroconf()
         zeroconf.unregister_service(self.info)
         zeroconf.close() 
+
+# Simple re-implementation of the http.server.HTTPServer base class
+class RemoteStashSocketServer(socketserver.TCPServer):
+
+    allow_reuse_address = 1    # Seems to make sense in testing environment
+
+    def __init__(self, server_address, RequestHandlerClass, stash):
+        """Constructor.  May be extended, do not override."""
+        self.server_address = server_address
+        self.RequestHandlerClass = RequestHandlerClass
+        self.stash = stash
+        self.server_name = None
+        # Call the base class TCPServer constructor method
+        super().__init__(server_address, RequestHandlerClass)
+
+    def server_bind(self):
+        """Override server_bind to store the server name."""
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = socket.getfqdn(host)
+        self.server_port = port
+
+    # Override the finish_request method to implement custom request handler args
+    def finish_request(self, request, client_address):
+        """
+        Finish one request by instantiating RequestHandlerClass.
+        Pass in our custom arg: stash
+        """
+        self.RequestHandlerClass(request, client_address, self, stash=self.stash)
     
+class RemoteStashServer(RemoteStashSocketServer):
+    '''
+    Implement an https server that can use our custom instance variables
+    '''
+    def eprint(self, *args, **kwargs):
+        """A print function to print directly to stderr."""
+        print(*args, file=sys.stderr, **kwargs)
+
+    def __init__(self, server_address, stash):
+        """Constructor for RemoteStashServer."""
+        self.RequestHandlerClass = RemoteStashServerRequestHandler
+        self.stash = stash
+        if self.stash.verbose > 3:
+            self.eprint(f'{self.__class__.__name__}.__init__({self}, {server_address}, {stash})')
+            self.eprint(f'Calling: {super().__class__.__name__}.__init__({server_address}, {self.RequestHandlerClass}, {stash})')
+        super().__init__(server_address, self.RequestHandlerClass, stash)
+
 class RemoteStashServer(BaseHTTPRequestHandler):
     '''
     Implement an https server that will process the remotestash protocol using a local stash
