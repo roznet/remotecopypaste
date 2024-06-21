@@ -799,6 +799,7 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
 
     def __init__(self, *args, stash):
         self.server_version = "RemoteStashServer/" + __version__
+        self.protocol_version = "HTTP/1.1" # Default to HTTP/1.1 for Expect: 100-continue support
         self.error_message_format = self.DEFAULT_ERROR_MESSAGE_FORMAT
         self.error_content_type = self.DEFAULT_ERROR_CONTENT_TYPE
         # Pull our verbosity level and args from RemoteStash object
@@ -892,6 +893,21 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
         if self.verbose > 2:
             self.log_message('Headers: %s', self.sanitize_data(self.headers))
 
+        if 'Expect' in self.headers:
+            if self.verbose > 1:
+                self.eprint(f'Client sent: Expect: {self.sanitize_data(self.headers["expect"])}')
+            if self.headers['expect'].lower() == '100-continue':
+                # BaseHTTPRequestHandler.parse_request() Handles 100 Continue
+                # for HTTP >= 1.1 See: IETF RFC 7231-2 § 5.1.1
+                self.eprint(f'self.protocol_version: {self.protocol_version}')
+                # We would have to do this if we kept server protocol_version at HTTP/1.0
+                # self.handle_expect_100()
+                # self.respond(100, {'Continue': 'HTTP/1.1 100 Continue'})
+                # self.end_headers()
+            else:
+                # Respond 417 to unknown Expect: values according to IETF RFC 7231-2 § 5.1.1
+                self.respond(417, {}, 'Expectation Failed', log_message=f'Expectation Failed: {self.sanitize_data(self.headers["expect"])}')
+                raise NotImplementedError(f'Unsupported "Expect:" header value: {self.sanitize_data(self.headers["expect"])}')
         if 'Content-Type' in self.headers:
             if self.verbose > 1:
                 self.log_message('Content-Type: %s', self.sanitize_data(self.headers["content-type"][:100]))
