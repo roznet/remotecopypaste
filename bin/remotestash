@@ -769,6 +769,9 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
     DEFAULT_ERROR_CONTENT_TYPE = "application/json;charset=utf-8"
     DEFAULT_ERROR_JSON_FORMAT = """{"code": %(code)d, "message": %(message)s, "explanation": %(explain)s}"""
     DEFAULT_OK_CONTENT_TYPE = "application/json;charset=utf-8"
+    # TODO: Should we implement this for success responses as well? If so, we
+    # should add a 'success' key to the response and/or modify the iOS app to
+    # work with this.
     DEFAULT_OK_JSON_FORMAT = """{"code": %(code)d, "message": %(message)s, "explanation": %(explain)s}"""
 
 
@@ -1002,6 +1005,15 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 content_length_int = int(self.headers['Content-Length'])
             else:
                 content_length_int = -1
+                self.eprint(f'Request missing Content-Length: {self.sanitize_data([k[:100] for k in self.headers.keys()])}')
+                if self.verbose > 2:
+                    # Note: Reproduce this case by sending a POST request without Content-Length, and sending an actively growing log file to the server
+                    #  host_addr=$(remotestash  list  | grep '\.local\. on' | sed -r -e 's/.*\.local\.? on (([0-9]{1,3}\.){3}[0-9]{1,3}):([0-9]+)/\1:\3/');
+                    #  log_file=/var/log/something.log;
+                    #  curl -k -F "file=@${log_file};filename=$(basename ${log_file})" "https://${host_addr}/push" -o -  -XPOST -H "Content-Length:" -v
+                    self.eprint('multipart.parse_form_data() will read until EOF.  This could allow for DoS attacks if client never stops sending data.')
+                    # TODO: Implement timeout for reading unspecified length data from client
+
             if self.verbose > 1:
                 self.eprint( f'Content-Length from self.headers: {content_length_int}')
             # Replace functionality of deprecated cgi.FieldStorage() with multipart.parse_form_data()
@@ -1010,6 +1022,10 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 strict_mode = True
                 mem_limit = self.DEFAULT_CONTENT_LENGTH_MEM_LIMIT
                 disk_limit = self.DEFAULT_CONTENT_LENGTH_DISK_LIMIT
+                if self.verbose > 2:
+                    self.eprint(f'breakdown_request(): Memory limit for parse_form_data(): {mem_limit}')
+                    self.eprint(f'breakdown_request(): Disk limit for parse_form_data(): {disk_limit}')
+                    self.eprint(f'TODO: breakdown_request(): Pass REQUEST_METHOD properly: {self.request.__dir__()}')
                 (forms, files) = parse_form_data({'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': self.headers['content-type'], 
                                                   'wsgi.input': self.rfile, 'CONTENT_LENGTH': content_length_int },
                                                   charset="utf8", strict=strict_mode, mem_limit=mem_limit, disk_limit=disk_limit)
