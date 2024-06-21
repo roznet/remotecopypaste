@@ -1128,7 +1128,18 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
             #             }
             #         )
             # self.send_response(response_value, message=http_status_message)
-            self.send_response(response_value, message=content)
+            if content and isinstance(content,bytes):
+                resp_content_length = len(content)
+            elif content:
+                resp_content_length = len(content.encode( 'utf-8', 'backslashreplace' ))
+            else:
+                resp_content_length = 0
+            # Note: Old code sent message=content, but this causes the client to
+            # receive the raw content as the HTTP status message line! This
+            # caused errors. We now send the actual HTTP status message as the
+            # message, and send the content as the response body.
+            self.send_response(response_value, message=http_status_message)
+            headers.update({ 'Content-Length': str(resp_content_length) })
             # Only for logging below
             msg = f'Response: {http_status_message} - {sanitized_content}'
         else: # Error response
