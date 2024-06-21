@@ -752,6 +752,19 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
     '''
     Implement an https server that will process the remotestash protocol using a local stash
     '''
+    # Memory Limit only applies verbatim if Content-Type is "application/x-www-form-urlencoded" (RFC 7578 § 5.3), or "application/x-url-encoded" (RFC 2388 § 5.6)
+    # Otherwise, for "multipart/form-data" the limit is the minimum of:
+    # disk_limit (default: 2^30), and mem_limit (default: 2^20)
+    # The entire request is read into memory if Content-Length is not sent.
+    # Note: "application/x-url-encoded" was a typo in RFC 2388, subsequent
+    # errata corrected it to "application/x-www-form-urlencoded", but python
+    # multipart module still supports it.
+    # References:
+    #   - https://www.rfc-editor.org/rfc/inline-errata/rfc2388.html
+    #   - https://www.rfc-editor.org/errata_search.php?rfc=2388&rec_status=0&errata_type=1
+    #   - https://www.rfc-editor.org/rfc/inline-errata/rfc7578.html
+    DEFAULT_CONTENT_LENGTH_MEM_LIMIT = 2**20 # 1 MiB (default 'mem_limit' inside parse_form_data())
+    DEFAULT_CONTENT_LENGTH_DISK_LIMIT = 2**30 # 1 GiB (default 'disk_limit' inside MultipartParser)
     DEFAULT_ERROR_MESSAGE_FORMAT = "" # Empty to avoid python bytes string (b"") in the response
     DEFAULT_ERROR_CONTENT_TYPE = "application/json;charset=utf-8"
     DEFAULT_ERROR_JSON_FORMAT = """{"code": %(code)d, "message": %(message)s, "explanation": %(explain)s}"""
@@ -993,9 +1006,12 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 self.eprint( f'Content-Length from self.headers: {content_length_int}')
             # Replace functionality of deprecated cgi.FieldStorage() with multipart.parse_form_data()
             try:
+                strict_mode = True
+                mem_limit = self.DEFAULT_CONTENT_LENGTH_MEM_LIMIT
+                disk_limit = self.DEFAULT_CONTENT_LENGTH_DISK_LIMIT
                 (forms, files) = parse_form_data({'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': self.headers['content-type'], 
                                                   'wsgi.input': self.rfile, 'CONTENT_LENGTH': content_length_int },
-                                                  charset="utf8", strict=False)
+                                                  charset="utf8", strict=strict_mode, mem_limit=mem_limit, disk_limit=disk_limit)
             except MultipartError as e:
                 match e.args[0]:
                     case 'Boundary does not fit into buffer_size.':
