@@ -1141,14 +1141,17 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                                 )
             # Note: We can not use send_error() here, as it will send HTML escaped character entities
             #      and we want to send raw JSON. We will have to manually send the response.
+            resp_content_length = len(err_json_response.encode('utf-8', 'backslashreplace'))
             self.send_response(response_value, message=http_status_message)
-            self.send_header('Content-Type', self.DEFAULT_ERROR_CONTENT_TYPE)
+            headers.update({ 'Content-Type': self.DEFAULT_ERROR_CONTENT_TYPE })
+            headers.update({ 'Content-Length': str(resp_content_length) })
         ctype = None
         if headers:
             for header,value in headers.items():
                 if header.lower() == 'content-type':
                     ctype = value
                     
+                self.eprint(f'Sending Header: {header}: value: {value}')
                 self.send_header(header,value)
         self.end_headers()
         if err_json_response:
