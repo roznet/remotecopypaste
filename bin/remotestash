@@ -876,7 +876,13 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
         val = stash.status()
         rv = RemoteStashItem.from_json( json.dumps(val) )
         self.respond_item( rv )
+
+    def do_COFFEE(self):
+        self.do_TEA()
         
+    def do_TEA(self):
+        self.respond( 418, {}, '🫖', log_message=self.HTTP_STATUS_DESCRIPTIONS[418] )
+
     def do_POST(self):
         self.do_GET()
         
