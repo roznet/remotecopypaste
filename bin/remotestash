@@ -825,13 +825,19 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
             pass
 
         stash = RemoteStashLocal({})
-        stash.verbose = True
+        if self.verbose > 0:
+            stash.verbose = True
         info = { 'content-type': self.content_type }
         if self.filename:
             info['filename'] = self.filename
         item = RemoteStashItem.from_data( self.body, info )
         try:
             stash.push( item )
+        except NotImplementedError as e:
+            if self.verbose > 1:
+                self.log_error('%s: %s', type(e).__name__, str(e))
+                self.eprint( f'Error: \n{traceback.format_exc()}' )
+            raise
         except Exception as e:
             if self.verbose > 1:
                 self.log_error('%s: %s', type(e).__name__, str(e))
@@ -863,20 +869,46 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
         self.do_GET()
         
     def do_GET(self):
-        self.breakdown_request()
+        try:
+            self.breakdown_request()
+        except NotImplementedError as e:
+            self.eprint('Encountered a NotImplementedError when handling request. This is normal for some unsupported or unknown requests.')
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            self.close_connection = True
+            return
+        except MultipartError as e:
+            self.eprint('Encountered a MultipartError when handling request. This was probably due to the client sending something unexpected.')
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            self.close_connection = True
+            return
+        except Exception as e:
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            self.close_connection = True
+            return
 
-        response = None
-        if self.parsed_path.path.startswith( '/push' ):
-            self.push()
-        elif self.parsed_path.path.startswith( '/pull' ):
-            self.pull()
-        elif self.parsed_path.path.startswith( '/last' ):
-            self.last()
-        elif self.parsed_path.path.startswith( '/status' ):
-            self.status()
-        else:
-            self.respond( 500, {}, '' )
-                
+        hasResponse = False
+        try:
+            supported_paths = ['push', 'pull', 'last', 'status']
+            for method in supported_paths:
+                if self.parsed_path.path.startswith( f'/{method}' ):
+                    if self.verbose > 2:
+                        self.eprint(f'Calling {method}()')
+                    getattr(self, method)()
+                    break
+            else: # Respond 400 to unknown API paths: Bad Request
+                allowed_msg = ', '.join('/' + m for m in supported_paths)
+                self.respond( 400, {'Allowed': allowed_msg}, f'Unknown API path: {self.parsed_path.path}', log_message=f'Bad API path in request. Did you mean: {allowed_msg}' )
+                hasResponse = True
+        except Exception as e:
+            # Something wrong on our end
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            if not hasResponse: # If error happened during self.reponse call, don't respond again
+                self.respond( 500, {}, 'Internal Server Error', log_message=f'Error: {str(type(e).__name__)}: {str(e)} ocurred.\n{traceback.format_exc()}' )
+
     def breakdown_request(self):
         self.parsed_path = parse.urlparse(self.path)
         self.query_dict = parse.parse_qs(self.parsed_path.query)
@@ -947,25 +979,37 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                                                   'wsgi.input': self.rfile, 'CONTENT_LENGTH': content_length_int },
                                                   charset="utf8", strict=False)
             except MultipartError as e:
-                match e:
-                    case MultipartError("Boundary does not fit into buffer_size."):
+                match e.args[0]:
+                    case 'Boundary does not fit into buffer_size.':
                         response_code = 500
-                    case MultipartError("Memory limit reached."):
+                    case 'Memory limit reached.':
                         response_code = 500
-                    case MultipartError("Disk limit reached."):
-                        response_code = 500
-                    case MultipartError("Request too big. Increase MAXMEM."):
-                        response_code = 500
+                    case 'Disk limit reached.':
+                        if self.verbose > 3:
+                            # If we are in verbose mode, send the real cause of the error to client
+                            response_code = 507 # Insufficient Storage
+                        else:
+                            # We may not trust the client, send generic 500 error
+                            response_code = 500 # Internal Server Error
+                    case 'Request too big. Increase MAXMEM.':
+                        response_code = 413 # Request Entity Too Large
+                    case 'Unsupported content type.':
+                        response_code = 415 # Unsupported Media Type
+                    case 'Request method other than POST or PUT.':
+                        response_code = 405 # Method Not Allowed
+                        err_headers = {'Allow': 'POST, PUT'}
+                    case 'Unexpected end of multipart stream.':
+                        response_code = 400 # Bad Request
                     case _:
                         # All other MultiPartError types are due to bad client requests
                         response_code = 400
                 self.log_error(f'Error: {e}')
-                self.respond( response_code, {}, str(type(e).__name__), log_message=f'Error: {e}')
-                return
+                self.respond( response_code, err_headers if err_headers else {}, str(type(e).__name__), log_message=f'Error: {e}')
+                raise
             except Exception as e:
                 self.log_error(f'Error: {e}')
                 self.respond( 500, {}, str(type(e).__name__), log_message=f'Error: {e}' )
-                return
+                raise
             if len(files) > 0:
                 # Only handle the first file found
                 if self.verbose > 1:
