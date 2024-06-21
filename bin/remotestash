@@ -830,6 +830,7 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
         self.protocol_version = "HTTP/1.1" # Default to HTTP/1.1 for Expect: 100-continue support
         self.error_message_format = self.DEFAULT_ERROR_MESSAGE_FORMAT
         self.error_content_type = self.DEFAULT_ERROR_CONTENT_TYPE
+        self.timeout = 60 # Default to 1 minute for handle_request timeout
         # Pull our verbosity level and args from RemoteStash object
         self.verbose = stash.verbose
         self.args = stash.args
@@ -907,6 +908,12 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
             self.breakdown_request()
         except NotImplementedError as e:
             self.eprint('Encountered a NotImplementedError when handling request. This is normal for some unsupported or unknown requests.')
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            self.close_connection = True
+            return
+        except TimeoutError as e:
+            self.eprint('Encountered a TimeoutError when handling request. This was probably due to the client taking too long to send the request, not sending Content-Type, and/or never sending the final multipart/form-data boundary delimiter.')
             self.eprint(f'Error: {e}')
             self.eprint(f'Error: \n{traceback.format_exc()}')
             self.close_connection = True
@@ -1025,10 +1032,15 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 if self.verbose > 2:
                     self.eprint(f'breakdown_request(): Memory limit for parse_form_data(): {mem_limit}')
                     self.eprint(f'breakdown_request(): Disk limit for parse_form_data(): {disk_limit}')
+                    self.eprint(f'breakdown_request(): Request handler timeout for socketserver.BaseServer: {self.timeout}')
                     self.eprint(f'TODO: breakdown_request(): Pass REQUEST_METHOD properly: {self.request.__dir__()}')
                 (forms, files) = parse_form_data({'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': self.headers['content-type'], 
                                                   'wsgi.input': self.rfile, 'CONTENT_LENGTH': content_length_int },
                                                   charset="utf8", strict=strict_mode, mem_limit=mem_limit, disk_limit=disk_limit)
+            except TimeoutError as e:
+                self.log_error(f'Error: {e}')
+                self.respond( 408, err_headers if err_headers else {}, str(type(e).__name__), log_message=f'Error: {e}')
+                raise
             except MultipartError as e:
                 match e.args[0]:
                     case 'Boundary does not fit into buffer_size.':
