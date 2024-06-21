@@ -948,14 +948,14 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 self.eprint(f'Client sent: Expect: {self.sanitize_data(self.headers["expect"])}')
             if self.headers['expect'].lower() == '100-continue':
                 # BaseHTTPRequestHandler.parse_request() Handles 100 Continue
-                # for HTTP >= 1.1 See: IETF RFC 7231-2 § 5.1.1
+                # for HTTP >= 1.1 See: IETF RFC 7231 § 5.1.1 (obsolete) and updated RFC 9110 § 10.1.1
                 self.eprint(f'self.protocol_version: {self.protocol_version}')
                 # We would have to do this if we kept server protocol_version at HTTP/1.0
                 # self.handle_expect_100()
                 # self.respond(100, {'Continue': 'HTTP/1.1 100 Continue'})
                 # self.end_headers()
             else:
-                # Respond 417 to unknown Expect: values according to IETF RFC 7231-2 § 5.1.1
+                # Respond 417 to unknown Expect: values according to IETF RFC 9110 § 10.1.1
                 self.respond(417, {}, 'Expectation Failed', log_message=f'Expectation Failed: {self.sanitize_data(self.headers["expect"])}')
                 raise NotImplementedError(f'Unsupported "Expect:" header value: {self.sanitize_data(self.headers["expect"])}')
         if 'Content-Type' in self.headers:
