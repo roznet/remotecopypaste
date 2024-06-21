@@ -1005,6 +1005,7 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
             if self.verbose > 1:
                 self.eprint( f'Content-Length from self.headers: {content_length_int}')
             # Replace functionality of deprecated cgi.FieldStorage() with multipart.parse_form_data()
+            err_headers = None
             try:
                 strict_mode = True
                 mem_limit = self.DEFAULT_CONTENT_LENGTH_MEM_LIMIT
