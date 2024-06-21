@@ -773,21 +773,29 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
 
         Replace any Unicode control characters with escaped hex.
         """
-        self.eprint( f'type(data): {type(data)}' )
-        _type = type(data)
-        match _type:
+        if self.verbose > 4:
+            self.eprint( f'sanitize_data() - type(data): {type(data)}' )
+        match type(data):
             case builtins.bytes:
                 return ''.join(
-                    c if c.isprintable() else fr'\x{ord(chr(c)):02x}'
-                    for c in data.decode('utf-8', 'replace')
+                    c for c in data.decode('utf-8', 'backslashreplace')
                 )
             case builtins.str:
                 return ''.join(
                     c if c.isprintable() else fr'\x{ord(c):02x}'
                     for c in data
                 )
+            case builtins.int:
+                return str(int(data))
+            case builtins.dict:
+                return {self.sanitize_data(k): self.sanitize_data(v) for k, v in data.items()}
             case _:
-                return ''
+                if hasattr(data, '__str__'):
+                    return str(data)
+                elif hasattr(data, '__repr__'):
+                    return repr(data)
+                else:
+                    return ''
 
     def __init__(self, *args, stash):
         self.server_version = "RemoteStashServer/" + __version__
@@ -1311,7 +1319,7 @@ if __name__ == "__main__":
     parser.add_argument( '-c', '--content-type', help='content type' )
     parser.add_argument( '-l', '--local', action='store_true', help='use local stash' )
     parser.add_argument( '-n', '--name', help='name for service' )
-    parser.add_argument( '-v', '--verbose', action='count', default=False, help='verbose output. Pass multiple times to be very verbose and display more debug info. Supports up to 4 -v flags.' )
+    parser.add_argument( '-v', '--verbose', action='count', default=False, help='verbose output. Pass multiple times to be very verbose and display more debug info. Supports up to 5 -v flags.' )
     parser.add_argument( '-p', '--port', help='port to use if not set will use a free port' )
     parser.add_argument( '-t', '--timeout', help='timeout for searching for a RemoteStash on the network', default=5.0, type=float )
     parser.add_argument( 'file',nargs='?', help='file name to read or save, empty or - for stdout/stdin' )
