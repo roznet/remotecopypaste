@@ -888,36 +888,36 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
         # Replace functionality of deprecated cgi.parse_header()
         msg = EmailMessage()
         if self.verbose > 1:
-            self.log_message("breakdown_request(): Handling request")
-        elif self.verbose > 2:
-            self.log_message(f'Headers: {self.headers}')
+            self.log_message('breakdown_request(): Handling request')
+        if self.verbose > 2:
+            self.log_message('Headers: %s', self.sanitize_data(self.headers))
 
         if 'Content-Type' in self.headers:
             if self.verbose > 1:
-                self.log_message(f'Content-Type: {self.headers["content-type"]}')
+                self.log_message('Content-Type: %s', self.sanitize_data(self.headers["content-type"][:100]))
             msg['content-type'] = self.headers['content-type']
             ctype, pdict = msg.get_content_type(), msg['content-type'].params
             if self.verbose > 2:
-                self.log_message(f'pdict: {pdict}')
+                self.log_message('pdict: %s', self.sanitize_data(pdict))
         else:
             ctype = 'application/octet-stream'
 
         if 'content-disposition' in self.headers:
             if self.verbose > 2:
-                self.log_message(f'Content-Disposition: {self.headers["content-disposition"]}')
-            msg['content-disposition'] = self.headers['content-disposition']
+                self.log_message('Content-Disposition: %s', self.sanitize_data(self.headers["content-disposition"]))
+            msg['content-disposition'] = self.sanitize_data(self.headers['content-disposition'][:100])
             cdisp, filename = msg.get_content_disposition(), msg.get_filename(failobj=None)
             if self.verbose > 2:
-                self.log_message(f'cdisp: {cdisp}, filename: {filename}')
-            self.info['content-disposition'] = cdisp
+                self.log_message('cdisp: %s, filename: %s', self.sanitize_data(cdisp[:100]), self.sanitize_data(filename[:100]))
+            self.info['content-disposition'] = self.sanitize_data(cdisp[:100])
             if filename:
-                self.filename = filename
+                self.filename = self.sanitize_data(filename[:100])
             
         if ctype == 'multipart/form-data':
             if self.verbose > 2:
-                self.log_message(f'ctype: {ctype}')
-                self.log_message(f'pdict: {pdict}')
-                self.log_message(f'rfile: {self.rfile}') if self.rfile else self.log_message('rfile: None')
+                self.log_message('ctype: %s', self.sanitize_data(ctype[:100]))
+                self.log_message('pdict: %s', self.sanitize_data(pdict))
+                self.log_message('rfile: %s', self.rfile) if self.rfile else self.log_message('rfile: None')
             # boundary_bytes = bytes(pdict['boundary'], 'utf-8') ## Now handled by multipart.parse_form_data()
             if 'Content-Length' in self.headers and self.headers['Content-Length']:
                 content_length_int = int(self.headers['Content-Length'])
@@ -956,26 +956,26 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                     self.eprint( f'Found {len(files)} files' )
                 for k in files.keys():
                     if self.verbose > 2:
-                        self.eprint( f'Found file key: {k}' )
-                        self.eprint( f'Found file: {files[k]}')
-                        self.eprint( f'Found filename: {files[k].filename}')
-                        self.eprint( f'size: {files[k].size}')
-                        self.eprint( f'Content-Type: {files[k].content_type}')
-                        self.eprint( f'Charset: {files[k].charset}')
-                        self.eprint( f'Content-Length: {files[k].content_length}')
-                        self.eprint( f'Content-Disposition: {files[k].disposition}')
+                        self.eprint( f'Found file key: {self.sanitize_data(k)}' )
+                        self.eprint( f'Found file: {self.sanitize_data(files[k])}')
+                        self.eprint( f'Found filename: {self.sanitize_data(files[k].filename[:100])}')
+                        self.eprint( f'size: {self.sanitize_data(files[k].size)}')
+                        self.eprint( f'Content-Type: {self.sanitize_data(files[k].content_type[:100])}')
+                        self.eprint( f'Charset: {self.sanitize_data(files[k].charset[:100])}')
+                        self.eprint( f'Content-Length: {self.sanitize_data(files[k].content_length)}')
+                        self.eprint( f'Content-Disposition: {self.sanitize_data(files[k].disposition[:100])}')
                         if self.verbose > 3:
-                            self.eprint( f'raw data: {files[k].raw}')
+                            self.eprint( f'raw data (1st 100 bytes): {self.sanitize_data(files[k].raw[:100]) + " ..."}')
                     filename = files[k].filename
                     record = files[k] # MultipartPart
                 if self.verbose > 1:
-                    self.eprint( f"files.keys()['file']: {files['file']}" )
+                    self.eprint( f"files.keys()['file']: {self.sanitize_data(files['file'])}" )
                 # filename = files.keys()[0]
                 # record = files[filename]
-                self.filename = filename
+                self.filename = self.sanitize_data(filename[:100])
                 self.body = record.raw
                 self.content_length = len(self.body)
-                self.content_type = record.content_type
+                self.content_type = self.sanitize_data(record.content_type[:100])
             else:
                 self.body = None
                 self.content_length = 0
@@ -1012,12 +1012,23 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
         http_status_message = http.client.responses[response_value] if response_value in http.client.responses else 'Unknown'
         http_status_description = self.HTTP_STATUS_DESCRIPTIONS[response_value] if response_value in self.HTTP_STATUS_DESCRIPTIONS else 'Unknown'
 
-        self.eprint(f'len(content): {len(content)}')
-        if len(content) > 100:
+        if content and len(content) > 100:
+            if self.verbose > 1:
+                self.eprint(f'Length of content ({len(content)}) was greater than 100 bytes... truncating for safer log output')
             sanitized_content = self.sanitize_data(content[:100])
         else:
             sanitized_content = self.sanitize_data(content)
-        self.eprint(f'sanitized_content: {sanitized_content}')
+
+        if len(headers) > 1000:
+            if self.verbose > 1:
+                self.eprint(f'Length of headers ({len(headers)}) was greater than 1000 chars... truncating for safer log output')
+            sanitized_headers = self.sanitize_data(str(headers)[:1000])
+        else:
+            sanitized_headers = self.sanitize_data(str(headers))
+
+        if self.verbose > 3:
+            self.eprint(f'sanitized_content: {sanitized_content}')
+            self.eprint(f'sanitized_headers: {sanitized_headers}')
 
         self.close_connection = True
         err_json_response = None
@@ -1089,8 +1100,9 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(content if isinstance(content,bytes) else content.encode( 'utf-8', 'replace' ) )
         # Always log what we responded to the client with, regardless of verbosity level
         self.eprint(f'{sanitized_content}')
-        self.log_message( f'Can I Log A {explanation} {headers}' )
-        # self.log_message( f'Response: {response_value} - {msg} - {explanation}, {len(content) if content else 0} bytes, {headers}' )
+        self.log_message( 'Response: %s - %s - %s, %d bytes, %s', response_value, msg, explanation, resp_content_length if resp_content_length else 0, sanitized_headers )
+        # OLD f-string caused "%" format string errors in BaseHTTPRequestHandler.log_message()
+        #   self.log_message( f'Response: {response_value} - {msg} - {explanation}, {len(content) if content else 0} bytes, {headers}' )
         
 class RemoteStash:
     def __init__(self,args=None):
