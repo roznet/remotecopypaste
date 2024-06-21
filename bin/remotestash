@@ -463,7 +463,19 @@ class RemoteStashLocal:
         '''
         item.save_asset(self.location_assets)
 
-        if len(self.contents['items']) and self.contents['items'][-1]['assetname'] == item.info['assetname']:
+        if len(self.contents['items']) and (
+            # If the item to be added doesn't have an assetname, server
+            # responded with a 500 error.
+            # Likely: MultipartError('Unexpected end of multipart stream.')
+            not hasattr(item.info, 'keys') or ('assetname' not in item.info.keys())
+            or
+                (
+                    # Check if the key exists first, else it throws KeyError!
+                    hasattr(self.contents['items'][-1], 'keys') and 'assetname' in self.contents['items'][-1].keys()
+                and
+                    self.contents['items'][-1]['assetname'] == item.info['assetname']
+                )
+            ):
             if self.verbose > 0:
                 print( f'Skipping adding duplicate of last {item}' )
             return
