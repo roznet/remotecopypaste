@@ -1155,12 +1155,12 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 self.send_header(header,value)
         self.end_headers()
         if err_json_response:
-            self.wfile.write(err_json_response.encode('utf-8', 'replace'))
+            self.wfile.write(err_json_response.encode('utf-8', 'backslashreplace'))
         ## Possible enhancement: Implement JSON response & receive in iOS client?
         # if ok_json_response:
         #     self.wfile.write(ok_json_response.encode('utf-8', 'replace'))
         if content and not err_json_response:
-            self.wfile.write(content if isinstance(content,bytes) else content.encode( 'utf-8', 'replace' ) )
+            self.wfile.write(content if isinstance(content,bytes) else content.encode( 'utf-8', 'backslashreplace' ) )
         # Always log what we responded to the client with, regardless of verbosity level
         self.eprint(f'{sanitized_content}')
         self.log_message( 'Response: %s - %s - %s, %d bytes, %s', response_value, msg, explanation, resp_content_length if resp_content_length else 0, sanitized_headers )
