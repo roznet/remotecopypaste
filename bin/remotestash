@@ -1174,7 +1174,8 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                 if header.lower() == 'content-type':
                     ctype = value
                     
-                self.eprint(f'Sending Header: {header}: value: {value}')
+                if self.verbose > 1:
+                    self.eprint(f'Sending Header: {header}: value: {value}')
                 self.send_header(header,value)
         self.end_headers()
         if err_json_response:
