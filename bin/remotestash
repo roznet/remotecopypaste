@@ -779,6 +779,8 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
     # Example of how to see all possible HTTPStatus descriptions:
     #  print(f'{[ HTTPStatus.__members__[thing].description for thing in things ] }
 
+    ALLOWED_METHODS = ["GET", "POST", "COFFEE", "TEA"]
+
     def eprint(self, *args, **kwargs):
         """
         A print function to print directly to stderr.
@@ -894,15 +896,30 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
         rv = RemoteStashItem.from_json( json.dumps(val) )
         self.respond_item( rv )
 
+    # Unsupported REST API methods: respond with 405 Method Not Allowed
+    # If we do not define these methods, the BaseHTTPRequestHandler will respond
+    # 501 "Unsupported Method ('FOO')" (Really: 501 Not Implemented)
+    # It also will not respond with any JSON or body content.
+    # However, it does not accurately describe the fact that we recognize these
+    # but explicitly don't allow them. We also want to respond with a JSON body
+    # with slightly more helpful information.
+    # Define each of these via meta-programming to avoid repetition
+    for method in ['HEAD', 'DELETE', 'PUT', 'OPTIONS', 'TRACE', 'CONNECT', 'PATCH']:
+        locals()[f'do_{method}'] = lambda self: (
+            allowed_msg := ', '.join(self.ALLOWED_METHODS) ,
+            self.respond(405, {'Allow': allowed_msg}, self.sanitize_data(self.command[:10]) if self.command else '', log_message=f'{self.HTTP_STATUS_DESCRIPTIONS[405]}. Did you mean: {allowed_msg}')
+        )
+
+    # Supported HTTP REST API Methods
     def do_COFFEE(self):
         self.do_TEA()
-        
+
     def do_TEA(self):
         self.respond( 418, {}, '🫖', log_message=self.HTTP_STATUS_DESCRIPTIONS[418] )
 
     def do_POST(self):
         self.do_GET()
-        
+
     def do_GET(self):
         try:
             self.breakdown_request()
@@ -1034,7 +1051,8 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                     self.eprint(f'breakdown_request(): Disk limit for parse_form_data(): {disk_limit}')
                     self.eprint(f'breakdown_request(): Request handler timeout for socketserver.BaseServer: {self.timeout}')
                     self.eprint(f'TODO: breakdown_request(): Pass REQUEST_METHOD properly: {self.request.__dir__()}')
-                (forms, files) = parse_form_data({'REQUEST_METHOD': 'POST', 'CONTENT_TYPE': self.headers['content-type'], 
+                    self.eprint(f'TODO: breakdown_request(): request.timeout: {self.request.timeout}')
+                (forms, files) = parse_form_data({'REQUEST_METHOD': self.command if self.command else 'POST', 'CONTENT_TYPE': self.headers['content-type'],
                                                   'wsgi.input': self.rfile, 'CONTENT_LENGTH': content_length_int },
                                                   charset="utf8", strict=strict_mode, mem_limit=mem_limit, disk_limit=disk_limit)
             except TimeoutError as e:
@@ -1060,7 +1078,7 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                         response_code = 415 # Unsupported Media Type
                     case 'Request method other than POST or PUT.':
                         response_code = 405 # Method Not Allowed
-                        err_headers = {'Allow': 'POST, PUT'}
+                        err_headers = {'Allow': ', '.join(self.ALLOWED_METHODS)}
                     case 'Unexpected end of multipart stream.':
                         response_code = 400 # Bad Request
                     case _:
