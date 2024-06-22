@@ -1035,8 +1035,7 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                     #  host_addr=$(remotestash  list  | grep '\.local\. on' | sed -r -e 's/.*\.local\.? on (([0-9]{1,3}\.){3}[0-9]{1,3}):([0-9]+)/\1:\3/');
                     #  log_file=/var/log/something.log;
                     #  curl -k -F "file=@${log_file};filename=$(basename ${log_file})" "https://${host_addr}/push" -o -  -XPOST -H "Content-Length:" -v
-                    self.eprint('multipart.parse_form_data() will read until EOF.  This could allow for DoS attacks if client never stops sending data.')
-                    # TODO: Implement timeout for reading unspecified length data from client
+                    self.eprint('multipart.parse_form_data() will read until EOF or timeout.  This could allow for DoS attacks if client never stops sending data and timeout is long.')
 
             if self.verbose > 1:
                 self.eprint( f'Content-Length from self.headers: {content_length_int}')
@@ -1050,8 +1049,6 @@ class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
                     self.eprint(f'breakdown_request(): Memory limit for parse_form_data(): {mem_limit}')
                     self.eprint(f'breakdown_request(): Disk limit for parse_form_data(): {disk_limit}')
                     self.eprint(f'breakdown_request(): Request handler timeout for socketserver.BaseServer: {self.timeout}')
-                    self.eprint(f'TODO: breakdown_request(): Pass REQUEST_METHOD properly: {self.request.__dir__()}')
-                    self.eprint(f'TODO: breakdown_request(): request.timeout: {self.request.timeout}')
                 (forms, files) = parse_form_data({'REQUEST_METHOD': self.command if self.command else 'POST', 'CONTENT_TYPE': self.headers['content-type'],
                                                   'wsgi.input': self.rfile, 'CONTENT_LENGTH': content_length_int },
                                                   charset="utf8", strict=strict_mode, mem_limit=mem_limit, disk_limit=disk_limit)
