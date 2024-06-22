@@ -23,6 +23,8 @@
 #  
 #
 
+__version__ = '2.0.0'
+
 from zeroconf import ServiceBrowser, Zeroconf, ServiceInfo
 import hashlib
 import mimetypes
@@ -34,14 +36,19 @@ import os
 from contextlib import closing
 import time
 import argparse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from urllib import parse
-import cgi
-from requests import Session, Request
+from email.message import EmailMessage
+from multipart import MultipartError, parse_form_data
+from requests import Session
 import pwd
 import json
 import sys
 from pprint import pprint
+import traceback
+import http.client
+import socketserver
+import builtins
 
 # certificated created with
 #  openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout remotestash-key.pem -out remotestash-cert.pem
@@ -152,23 +159,27 @@ class RemoteStashItem:
 
     def info_from_headers(headers):
         info = {}
+        # Replace functionality of deprecated cgi.parse_header()
+        msg = EmailMessage()
         if 'content-type' in headers:
-            ctype, pdict = cgi.parse_header(headers['content-type'])
+            msg['content-type'] = headers['content-type']
+            ctype, charset = msg.get_content_type(), msg.get_content_charset(failobj=None)
         else:
-            ctype, pdict = 'application/octet-stream', {}
-            
-        info['content-type'] = ctype
+            ctype, charset = 'application/octet-stream', {}
         
-        encoding = None
-        if 'charset' in pdict:
-            info['encoding'] = pdict['charset']
+        info['content-type'] = ctype
+        info['encoding'] = None
+        if charset:
+            info['encoding'] = charset
         elif ctype.startswith( 'text/' ):
             info['encoding'] = 'utf-8'
         
         if 'content-disposition' in headers:
-            cdisp, ddict = cgi.parse_header(headers['content-disposition'] )
-            if 'filename' in ddict:
-                info['filename'] = ddict['filename']
+            msg['content-disposition'] = headers['content-disposition']
+            cdisp, filename = msg.get_content_disposition(), msg.get_filename(failobj=None)
+            info['content-disposition'] = cdisp
+            if filename:
+                info['filename'] = filename
 
         return info
     
@@ -312,6 +323,12 @@ class RemoteStashLocal:
     The information of the content of the stash will be saved as contents.json
     will support pull,push,last,status operations
     '''
+    def eprint(self, *args, **kwargs):
+        if self.verbose > 3:
+            # print(self, *args, file=sys.stderr, **kwargs)
+            print(f'{self.__class__.__name__}', *args, file=sys.stderr, **kwargs)
+        else:
+            print(*args, file=sys.stderr, **kwargs)
     
     def __init__(self,args):
         self.args = args
@@ -355,7 +372,7 @@ class RemoteStashLocal:
             return item
         else:
             if self.verbose:
-                print( f'Local Stash empty no item to pull' )
+                print( 'Local Stash empty no item to pull' )
 
         return None
 
@@ -370,7 +387,7 @@ class RemoteStashLocal:
         remove asset for the item, will check if asset not used by another item
         before removing
         '''
-        assetname = item.info['assetname']
+        assetname = item.info['assetname'] if 'assetname' in item.info else ''
         remove=True
         # don't remove if asset used by another item
         for other in self.contents['items'][:-1]:
@@ -446,8 +463,20 @@ class RemoteStashLocal:
         '''
         item.save_asset(self.location_assets)
 
-        if len(self.contents['items']) and self.contents['items'][-1]['assetname'] == item.info['assetname']:
-            if True: #self.verbose:
+        if len(self.contents['items']) and (
+            # If the item to be added doesn't have an assetname, server
+            # responded with a 500 error.
+            # Likely: MultipartError('Unexpected end of multipart stream.')
+            not hasattr(item.info, 'keys') or ('assetname' not in item.info.keys())
+            or
+                (
+                    # Check if the key exists first, else it throws KeyError!
+                    hasattr(self.contents['items'][-1], 'keys') and 'assetname' in self.contents['items'][-1].keys()
+                and
+                    self.contents['items'][-1]['assetname'] == item.info['assetname']
+                )
+            ):
+            if self.verbose > 0:
                 print( f'Skipping adding duplicate of last {item}' )
             return
         
@@ -482,7 +511,7 @@ class RemoteStashClient:
         self.cmd = cmd
         self.stash = stash
         self.args = stash.args
-        if self.args.verbose:
+        if self.args.verbose > 0:
             self.verbose = True
         else:
             self.verbose = False
@@ -560,7 +589,7 @@ class RemoteStashClient:
             if self.content_type:
                 headers[ 'Content-Type'] =  self.content_type
             if self.verbose:
-                print( 'starting POST {}  data {}'.format(url,self.filename,self.content_type) )
+                print( 'starting POST {}  data {}'.format(url,self.filename,) )
             response = self.session.post( url, verify=False, data = data, headers = headers )
         return response
 
@@ -672,22 +701,180 @@ class RemoteStashServerAdvertiser:
         zeroconf = Zeroconf()
         zeroconf.unregister_service(self.info)
         zeroconf.close() 
+
+# Simple re-implementation of the http.server.HTTPServer base class
+class RemoteStashSocketServer(socketserver.TCPServer):
+
+    allow_reuse_address = 1    # Seems to make sense in testing environment
+
+    def __init__(self, server_address, RequestHandlerClass, stash):
+        """Constructor.  May be extended, do not override."""
+        self.server_address = server_address
+        self.RequestHandlerClass = RequestHandlerClass
+        self.stash = stash
+        self.server_name = None
+        # Call the base class TCPServer constructor method
+        super().__init__(server_address, RequestHandlerClass)
+
+    def server_bind(self):
+        """Override server_bind to store the server name."""
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = socket.getfqdn(host)
+        self.server_port = port
+
+    # Override the finish_request method to implement custom request handler args
+    def finish_request(self, request, client_address):
+        """
+        Finish one request by instantiating RequestHandlerClass.
+        Pass in our custom arg: stash
+        """
+        self.RequestHandlerClass(request, client_address, self, stash=self.stash)
     
-class RemoteStashServer(BaseHTTPRequestHandler):
+class RemoteStashServer(RemoteStashSocketServer):
+    '''
+    Implement an https server that can use our custom instance variables
+    '''
+    def eprint(self, *args, **kwargs):
+        """A print function to print directly to stderr."""
+        print(*args, file=sys.stderr, **kwargs)
+
+    def __init__(self, server_address, stash):
+        """Constructor for RemoteStashServer."""
+        self.RequestHandlerClass = RemoteStashServerRequestHandler
+        self.stash = stash
+        if self.stash.verbose > 3:
+            self.eprint(f'{self.__class__.__name__}.__init__({self}, {server_address}, {stash})')
+            self.eprint(f'Calling: {super().__class__.__name__}.__init__({server_address}, {self.RequestHandlerClass}, {stash})')
+        super().__init__(server_address, self.RequestHandlerClass, stash)
+
+class RemoteStashServerRequestHandler(BaseHTTPRequestHandler):
     '''
     Implement an https server that will process the remotestash protocol using a local stash
     '''
+    # Memory Limit only applies verbatim if Content-Type is "application/x-www-form-urlencoded" (RFC 7578 § 5.3), or "application/x-url-encoded" (RFC 2388 § 5.6)
+    # Otherwise, for "multipart/form-data" the limit is the minimum of:
+    # disk_limit (default: 2^30), and mem_limit (default: 2^20)
+    # The entire request is read into memory if Content-Length is not sent.
+    # Note: "application/x-url-encoded" was a typo in RFC 2388, subsequent
+    # errata corrected it to "application/x-www-form-urlencoded", but python
+    # multipart module still supports it.
+    # References:
+    #   - https://www.rfc-editor.org/rfc/inline-errata/rfc2388.html
+    #   - https://www.rfc-editor.org/errata_search.php?rfc=2388&rec_status=0&errata_type=1
+    #   - https://www.rfc-editor.org/rfc/inline-errata/rfc7578.html
+    DEFAULT_CONTENT_LENGTH_MEM_LIMIT = 2**20 # 1 MiB (default 'mem_limit' inside parse_form_data())
+    DEFAULT_CONTENT_LENGTH_DISK_LIMIT = 2**30 # 1 GiB (default 'disk_limit' inside MultipartParser)
+    DEFAULT_ERROR_MESSAGE_FORMAT = "" # Empty to avoid python bytes string (b"") in the response
+    DEFAULT_ERROR_CONTENT_TYPE = "application/json;charset=utf-8"
+    DEFAULT_ERROR_JSON_FORMAT = """{"code": %(code)d, "message": %(message)s, "explanation": %(explain)s}"""
+    DEFAULT_OK_CONTENT_TYPE = "application/json;charset=utf-8"
+    # TODO: Should we implement this for success responses as well? If so, we
+    # should add a 'success' key to the response and/or modify the iOS app to
+    # work with this.
+    DEFAULT_OK_JSON_FORMAT = """{"code": %(code)d, "message": %(message)s, "explanation": %(explain)s}"""
+
+
+    HTTP_STATUS_DESCRIPTIONS = { v: v.description for v in http.HTTPStatus.__members__.values() }
+    # Example of how to see all possible HTTPStatus descriptions:
+    #  print(f'{[ HTTPStatus.__members__[thing].description for thing in things ] }
+
+    ALLOWED_METHODS = ["GET", "POST", "COFFEE", "TEA"]
+
+    def eprint(self, *args, **kwargs):
+        """
+        A print function to print directly to stderr.
+
+        Bypasses the machinery of the log_message() method, which replaces
+        Unicode control characters with escaped hex before writing the output to
+        stderr.
+
+        This allows us to print the traceback of an exception to stderr without
+        string mangling and newlines included.
+        """
+        if self.verbose > 3:
+            print(self, *args, file=sys.stderr, **kwargs)
+        else:
+            print(*args, file=sys.stderr, **kwargs)
+
+    def sanitize_data(self, data):
+        """
+        Sanitize data for printing to stderr.
+
+        Replace any Unicode control characters with escaped hex.
+        """
+        if self.verbose > 4:
+            self.eprint( f'sanitize_data() - type(data): {type(data)}' )
+        match type(data):
+            case builtins.bytes:
+                return ''.join(
+                    c for c in data.decode('utf-8', 'backslashreplace')
+                )
+            case builtins.str:
+                return ''.join(
+                    c if c.isprintable() else fr'\x{ord(c):02x}'
+                    for c in data
+                )
+            case builtins.int:
+                return str(int(data))
+            case builtins.dict:
+                return {self.sanitize_data(k): self.sanitize_data(v) for k, v in data.items()}
+            case _:
+                if hasattr(data, '__str__'):
+                    return str(data)
+                elif hasattr(data, '__repr__'):
+                    return repr(data)
+                else:
+                    return ''
+
+    def __init__(self, *args, stash):
+        self.server_version = "RemoteStashServer/" + __version__
+        self.protocol_version = "HTTP/1.1" # Default to HTTP/1.1 for Expect: 100-continue support
+        self.error_message_format = self.DEFAULT_ERROR_MESSAGE_FORMAT
+        self.error_content_type = self.DEFAULT_ERROR_CONTENT_TYPE
+        self.timeout = 60 # Default to 1 minute for handle_request timeout
+        # Pull our verbosity level and args from RemoteStash object
+        self.verbose = stash.verbose
+        self.args = stash.args
+        if self.verbose > 3:
+            self.eprint( f'{self.__class__.__name__}__init__({self}, {args}, {stash})' )
+            # self.eprint( f'self.__dir__() = {self.__dir__()}' )
+            # self.eprint( f'__init__(self, {args})' )
+            # self.eprint( f'stash.__dir__() = {stash.__dir__()}' )
+        # Initialize to None
+        self.body = None
+        self.content_type = None
+        self.content_length = None
+        self.filename = None
+        # Call the base class BaseHTTPRequestHandler constructor method
+        # Don't pass our custom stash arg now that we've stored what we wanted
+        # in self
+        super().__init__(*args)
+
     def push(self):
         if self.body is None:
             pass
 
         stash = RemoteStashLocal({})
-        stash.verbose = True
+        if self.verbose > 0:
+            stash.verbose = True
         info = { 'content-type': self.content_type }
         if self.filename:
             info['filename'] = self.filename
         item = RemoteStashItem.from_data( self.body, info )
-        stash.push( item )
+        try:
+            stash.push( item )
+        except NotImplementedError as e:
+            if self.verbose > 1:
+                self.log_error('%s: %s', type(e).__name__, str(e))
+                self.eprint( f'Error: \n{traceback.format_exc()}' )
+            raise
+        except Exception as e:
+            if self.verbose > 1:
+                self.log_error('%s: %s', type(e).__name__, str(e))
+                self.eprint( f'Error: \n{traceback.format_exc()}' )
+            self.respond( 500, {}, f'{type(e).__name__}: {str(e)}', log_message=f'Error: {str(type(e).__name__)}: {str(e)} ocurred.\n{traceback.format_exc()}' )
+            return
         self.respond( 200, { 'content-type' : 'application/json; charset=utf-8' }, json.dumps({'success':1}), log_message=f'Received: {item}' )
 
     def pull(self):
@@ -708,54 +895,225 @@ class RemoteStashServer(BaseHTTPRequestHandler):
         val = stash.status()
         rv = RemoteStashItem.from_json( json.dumps(val) )
         self.respond_item( rv )
-        
+
+    # Unsupported REST API methods: respond with 405 Method Not Allowed
+    # If we do not define these methods, the BaseHTTPRequestHandler will respond
+    # 501 "Unsupported Method ('FOO')" (Really: 501 Not Implemented)
+    # It also will not respond with any JSON or body content.
+    # However, it does not accurately describe the fact that we recognize these
+    # but explicitly don't allow them. We also want to respond with a JSON body
+    # with slightly more helpful information.
+    # Define each of these via meta-programming to avoid repetition
+    for method in ['HEAD', 'DELETE', 'PUT', 'OPTIONS', 'TRACE', 'CONNECT', 'PATCH']:
+        locals()[f'do_{method}'] = lambda self: (
+            allowed_msg := ', '.join(self.ALLOWED_METHODS) ,
+            self.respond(405, {'Allow': allowed_msg}, self.sanitize_data(self.command[:10]) if self.command else '', log_message=f'{self.HTTP_STATUS_DESCRIPTIONS[405]}. Did you mean: {allowed_msg}')
+        )
+
+    # Supported HTTP REST API Methods
+    def do_COFFEE(self):
+        self.do_TEA()
+
+    def do_TEA(self):
+        self.respond( 418, {}, '🫖', log_message=self.HTTP_STATUS_DESCRIPTIONS[418] )
+
     def do_POST(self):
         self.do_GET()
-        
-    def do_GET(self):
-        self.breakdown_request()
 
-        response = None
-        if self.parsed_path.path.startswith( '/push' ):
-            self.push()
-        elif self.parsed_path.path.startswith( '/pull' ):
-            self.pull()
-        elif self.parsed_path.path.startswith( '/last' ):
-            self.last()
-        elif self.parsed_path.path.startswith( '/status' ):
-            self.status()
-        else:
-            self.respond( 500, {}, '' )
-                
+    def do_GET(self):
+        try:
+            self.breakdown_request()
+        except NotImplementedError as e:
+            self.eprint('Encountered a NotImplementedError when handling request. This is normal for some unsupported or unknown requests.')
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            self.close_connection = True
+            return
+        except TimeoutError as e:
+            self.eprint('Encountered a TimeoutError when handling request. This was probably due to the client taking too long to send the request, not sending Content-Type, and/or never sending the final multipart/form-data boundary delimiter.')
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            self.close_connection = True
+            return
+        except MultipartError as e:
+            self.eprint('Encountered a MultipartError when handling request. This was probably due to the client sending something unexpected.')
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            self.close_connection = True
+            return
+        except Exception as e:
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            self.close_connection = True
+            return
+
+        hasResponse = False
+        try:
+            supported_paths = ['push', 'pull', 'last', 'status']
+            for method in supported_paths:
+                if self.parsed_path.path.startswith( f'/{method}' ):
+                    if self.verbose > 2:
+                        self.eprint(f'Calling {method}()')
+                    getattr(self, method)()
+                    break
+            else: # Respond 400 to unknown API paths: Bad Request
+                allowed_msg = ', '.join('/' + m for m in supported_paths)
+                self.respond( 400, {'Allowed': allowed_msg}, f'Unknown API path: {self.parsed_path.path}', log_message=f'Bad API path in request. Did you mean: {allowed_msg}' )
+                hasResponse = True
+        except Exception as e:
+            # Something wrong on our end
+            self.eprint(f'Error: {e}')
+            self.eprint(f'Error: \n{traceback.format_exc()}')
+            if not hasResponse: # If error happened during self.reponse call, don't respond again
+                self.respond( 500, {}, 'Internal Server Error', log_message=f'Error: {str(type(e).__name__)}: {str(e)} ocurred.\n{traceback.format_exc()}' )
+
     def breakdown_request(self):
         self.parsed_path = parse.urlparse(self.path)
         self.query_dict = parse.parse_qs(self.parsed_path.query)
 
         self.headers_dict = {}
         for (k,v) in self.headers.items():
-            self.headers_dict[ k.lower() ] = v;
+            self.headers_dict[ k.lower() ] = v
         self.filename = None
 
+        # Replace functionality of deprecated cgi.parse_header()
+        msg = EmailMessage()
+        if self.verbose > 1:
+            self.log_message('breakdown_request(): Handling request')
+        if self.verbose > 2:
+            self.log_message('Headers: %s', self.sanitize_data(self.headers))
+
+        if 'Expect' in self.headers:
+            if self.verbose > 1:
+                self.eprint(f'Client sent: Expect: {self.sanitize_data(self.headers["expect"])}')
+            if self.headers['expect'].lower() == '100-continue':
+                # BaseHTTPRequestHandler.parse_request() Handles 100 Continue
+                # for HTTP >= 1.1 See: IETF RFC 7231 § 5.1.1 (obsolete) and updated RFC 9110 § 10.1.1
+                self.eprint(f'self.protocol_version: {self.protocol_version}')
+                # We would have to do this if we kept server protocol_version at HTTP/1.0
+                # self.handle_expect_100()
+                # self.respond(100, {'Continue': 'HTTP/1.1 100 Continue'})
+                # self.end_headers()
+            else:
+                # Respond 417 to unknown Expect: values according to IETF RFC 9110 § 10.1.1
+                self.respond(417, {}, 'Expectation Failed', log_message=f'Expectation Failed: {self.sanitize_data(self.headers["expect"])}')
+                raise NotImplementedError(f'Unsupported "Expect:" header value: {self.sanitize_data(self.headers["expect"])}')
         if 'Content-Type' in self.headers:
-            ctype, pdict = cgi.parse_header(self.headers['content-type'])
+            if self.verbose > 1:
+                self.log_message('Content-Type: %s', self.sanitize_data(self.headers["content-type"][:100]))
+            msg['content-type'] = self.headers['content-type']
+            ctype, pdict = msg.get_content_type(), msg['content-type'].params
+            if self.verbose > 2:
+                self.log_message('pdict: %s', self.sanitize_data(pdict))
         else:
             ctype = 'application/octet-stream'
 
         if 'content-disposition' in self.headers:
-            cdisp, ddict = cgi.parse_header(self.headers['content-disposition'] )
-            if 'filename' in ddict:
-                self.filename = ddict['filename']
+            if self.verbose > 2:
+                self.log_message('Content-Disposition: %s', self.sanitize_data(self.headers["content-disposition"]))
+            msg['content-disposition'] = self.sanitize_data(self.headers['content-disposition'][:100])
+            cdisp, filename = msg.get_content_disposition(), msg.get_filename(failobj=None)
+            if self.verbose > 2:
+                self.log_message('cdisp: %s, filename: %s', self.sanitize_data(cdisp[:100]), self.sanitize_data(filename[:100]))
+            self.info['content-disposition'] = self.sanitize_data(cdisp[:100])
+            if filename:
+                self.filename = self.sanitize_data(filename[:100])
             
         if ctype == 'multipart/form-data':
-            pdict['boundary'] = bytes(pdict['boundary'], 'utf-8')
-            pdict['content-length'] = int(self.headers['Content-Length'])
-            form = cgi.FieldStorage( fp=self.rfile, headers=self.headers, environ={'REQUEST_METHOD':'POST', 'CONTENT_TYPE':self.headers['Content-Type'], })
-            if 'file' in form:
-                record = form['file']
-                self.filename = record.filename
-                self.body = record.file.read()
+            if self.verbose > 2:
+                self.log_message('ctype: %s', self.sanitize_data(ctype[:100]))
+                self.log_message('pdict: %s', self.sanitize_data(pdict))
+                self.log_message('rfile: %s', self.rfile) if self.rfile else self.log_message('rfile: None')
+            # boundary_bytes = bytes(pdict['boundary'], 'utf-8') ## Now handled by multipart.parse_form_data()
+            if 'Content-Length' in self.headers and self.headers['Content-Length']:
+                content_length_int = int(self.headers['Content-Length'])
+            else:
+                content_length_int = -1
+                self.eprint(f'Request missing Content-Length: {self.sanitize_data([k[:100] for k in self.headers.keys()])}')
+                if self.verbose > 2:
+                    # Note: Reproduce this case by sending a POST request without Content-Length, and sending an actively growing log file to the server
+                    #  host_addr=$(remotestash  list  | grep '\.local\. on' | sed -r -e 's/.*\.local\.? on (([0-9]{1,3}\.){3}[0-9]{1,3}):([0-9]+)/\1:\3/');
+                    #  log_file=/var/log/something.log;
+                    #  curl -k -F "file=@${log_file};filename=$(basename ${log_file})" "https://${host_addr}/push" -o -  -XPOST -H "Content-Length:" -v
+                    self.eprint('multipart.parse_form_data() will read until EOF or timeout.  This could allow for DoS attacks if client never stops sending data and timeout is long.')
+
+            if self.verbose > 1:
+                self.eprint( f'Content-Length from self.headers: {content_length_int}')
+            # Replace functionality of deprecated cgi.FieldStorage() with multipart.parse_form_data()
+            err_headers = None
+            try:
+                strict_mode = True
+                mem_limit = self.DEFAULT_CONTENT_LENGTH_MEM_LIMIT
+                disk_limit = self.DEFAULT_CONTENT_LENGTH_DISK_LIMIT
+                if self.verbose > 2:
+                    self.eprint(f'breakdown_request(): Memory limit for parse_form_data(): {mem_limit}')
+                    self.eprint(f'breakdown_request(): Disk limit for parse_form_data(): {disk_limit}')
+                    self.eprint(f'breakdown_request(): Request handler timeout for socketserver.BaseServer: {self.timeout}')
+                (forms, files) = parse_form_data({'REQUEST_METHOD': self.command if self.command else 'POST', 'CONTENT_TYPE': self.headers['content-type'],
+                                                  'wsgi.input': self.rfile, 'CONTENT_LENGTH': content_length_int },
+                                                  charset="utf8", strict=strict_mode, mem_limit=mem_limit, disk_limit=disk_limit)
+            except TimeoutError as e:
+                self.log_error(f'Error: {e}')
+                self.respond( 408, err_headers if err_headers else {}, str(type(e).__name__), log_message=f'Error: {e}')
+                raise
+            except MultipartError as e:
+                match e.args[0]:
+                    case 'Boundary does not fit into buffer_size.':
+                        response_code = 500
+                    case 'Memory limit reached.':
+                        response_code = 500
+                    case 'Disk limit reached.':
+                        if self.verbose > 3:
+                            # If we are in verbose mode, send the real cause of the error to client
+                            response_code = 507 # Insufficient Storage
+                        else:
+                            # We may not trust the client, send generic 500 error
+                            response_code = 500 # Internal Server Error
+                    case 'Request too big. Increase MAXMEM.':
+                        response_code = 413 # Request Entity Too Large
+                    case 'Unsupported content type.':
+                        response_code = 415 # Unsupported Media Type
+                    case 'Request method other than POST or PUT.':
+                        response_code = 405 # Method Not Allowed
+                        err_headers = {'Allow': ', '.join(self.ALLOWED_METHODS)}
+                    case 'Unexpected end of multipart stream.':
+                        response_code = 400 # Bad Request
+                    case _:
+                        # All other MultiPartError types are due to bad client requests
+                        response_code = 400
+                self.log_error(f'Error: {e}')
+                self.respond( response_code, err_headers if err_headers else {}, str(type(e).__name__), log_message=f'Error: {e}')
+                raise
+            except Exception as e:
+                self.log_error(f'Error: {e}')
+                self.respond( 500, {}, str(type(e).__name__), log_message=f'Error: {e}' )
+                raise
+            if len(files) > 0:
+                # Only handle the first file found
+                if self.verbose > 1:
+                    self.eprint( f'Found {len(files)} files' )
+                for k in files.keys():
+                    if self.verbose > 2:
+                        self.eprint( f'Found file key: {self.sanitize_data(k)}' )
+                        self.eprint( f'Found file: {self.sanitize_data(files[k])}')
+                        self.eprint( f'Found filename: {self.sanitize_data(files[k].filename[:100])}')
+                        self.eprint( f'size: {self.sanitize_data(files[k].size)}')
+                        self.eprint( f'Content-Type: {self.sanitize_data(files[k].content_type[:100])}')
+                        self.eprint( f'Charset: {self.sanitize_data(files[k].charset[:100])}')
+                        self.eprint( f'Content-Length: {self.sanitize_data(files[k].content_length)}')
+                        self.eprint( f'Content-Disposition: {self.sanitize_data(files[k].disposition[:100])}')
+                        if self.verbose > 3:
+                            self.eprint( f'raw data (1st 100 bytes): {self.sanitize_data(files[k].raw[:100]) + " ..."}')
+                    filename = files[k].filename
+                    record = files[k] # MultipartPart
+                if self.verbose > 1:
+                    self.eprint( f"files.keys()['file']: {self.sanitize_data(files['file'])}" )
+                # filename = files.keys()[0]
+                # record = files[filename]
+                self.filename = self.sanitize_data(filename[:100])
+                self.body = record.raw
                 self.content_length = len(self.body)
-                self.content_type = record.type
+                self.content_type = self.sanitize_data(record.content_type[:100])
             else:
                 self.body = None
                 self.content_length = 0
@@ -773,9 +1131,9 @@ class RemoteStashServer(BaseHTTPRequestHandler):
 
         if self.content_length > 0:
             if self.filename:
-                print( f'Received {self.content_length} bytes, content-type: {self.content_type} filename: {self.filename}' )
+                self.log_message( f'Received {self.content_length} bytes, content-type: {self.content_type} filename: {self.filename}' )
             else:
-                print( f'Received {self.content_length} bytes, content-type: {self.content_type}' )
+                self.log_message( f'Received {self.content_length} bytes, content-type: {self.content_type}' )
 
     def respond_item(self,item):
         if item:
@@ -789,28 +1147,120 @@ class RemoteStashServer(BaseHTTPRequestHandler):
             self.respond( 200, {}, None )
             
     def respond(self,response_value, headers, content, log_message=None ):
-        self.send_response(response_value)
-        if log_message:
-            print( log_message )
+        http_status_message = http.client.responses[response_value] if response_value in http.client.responses else 'Unknown'
+        http_status_description = self.HTTP_STATUS_DESCRIPTIONS[response_value] if response_value in self.HTTP_STATUS_DESCRIPTIONS else 'Unknown'
+
+        if content and len(content) > 100:
+            if self.verbose > 1:
+                self.eprint(f'Length of content ({len(content)}) was greater than 100 bytes... truncating for safer log output')
+            sanitized_content = self.sanitize_data(content[:100])
+        else:
+            sanitized_content = self.sanitize_data(content)
+
+        if len(headers) > 1000:
+            if self.verbose > 1:
+                self.eprint(f'Length of headers ({len(headers)}) was greater than 1000 chars... truncating for safer log output')
+            sanitized_headers = self.sanitize_data(str(headers)[:1000])
+        else:
+            sanitized_headers = self.sanitize_data(str(headers))
+
+        if self.verbose > 3:
+            self.eprint(f'sanitized_content: {sanitized_content}')
+            self.eprint(f'sanitized_headers: {sanitized_headers}')
+
+        self.close_connection = True
+        err_json_response = None
+        # ok_json_response = None
+        if response_value < 200:
+            # Informational response
+            self.send_response(response_value, message=http_status_message)
+        elif (response_value >= 200 and response_value < 400 and
+            response_value not in (http.client.NO_CONTENT,
+                                   http.client.RESET_CONTENT,
+                                   http.client.NOT_MODIFIED)):
+            # Send non-error response to client
+            # (success, or redirection)
+            if log_message:
+                explanation = log_message
+            else:
+                explanation = http_status_description
+            ## Possible enhancement: Implement JSON response & receive in iOS client?
+            ## (not sure how binary data would be handled in JSON response)
+            # ok_json_response = (self.DEFAULT_OK_JSON_FORMAT % 
+            #             {
+            #             'code': int(response_value),
+            #             'message': json.dumps(content),
+            #             'explain': json.dumps(explanation)
+            #             }
+            #         )
+            # self.send_response(response_value, message=http_status_message)
+            if content and isinstance(content,bytes):
+                resp_content_length = len(content)
+            elif content:
+                resp_content_length = len(content.encode( 'utf-8', 'backslashreplace' ))
+            else:
+                resp_content_length = 0
+            # Note: Old code sent message=content, but this causes the client to
+            # receive the raw content as the HTTP status message line! This
+            # caused errors. We now send the actual HTTP status message as the
+            # message, and send the content as the response body.
+            self.send_response(response_value, message=http_status_message)
+            headers.update({ 'Content-Length': str(resp_content_length) })
+            # Only for logging below
+            msg = f'Response: {http_status_message} - {sanitized_content}'
+        else: # Error response
+            if self.verbose > 2:
+                # Send developer-friendly error message, but only when in very very verbose mode
+                # Avoid running server in very verbose mode in production, as it
+                # may leak stacktraces and other sensitive information to clients.
+                msg = f'Response: {http_status_message} - {sanitized_content}'
+                explanation = log_message
+            else:
+                # Send the generic HTTP status message and description
+                msg = f'Response: {http_status_message}'
+                explanation = http_status_description
+            # Run everything except the response_value through json.dumps() to
+            # escape special characters
+            err_json_response = (self.DEFAULT_ERROR_JSON_FORMAT % 
+                                 {
+                                    'code': int(response_value),
+                                    'message': json.dumps(msg),
+                                    'explain': json.dumps(explanation)
+                                 }
+                                )
+            # Note: We can not use send_error() here, as it will send HTML escaped character entities
+            #      and we want to send raw JSON. We will have to manually send the response.
+            resp_content_length = len(err_json_response.encode('utf-8', 'backslashreplace'))
+            self.send_response(response_value, message=http_status_message)
+            headers.update({ 'Content-Type': self.DEFAULT_ERROR_CONTENT_TYPE })
+            headers.update({ 'Content-Length': str(resp_content_length) })
         ctype = None
         if headers:
             for header,value in headers.items():
                 if header.lower() == 'content-type':
                     ctype = value
                     
+                if self.verbose > 1:
+                    self.eprint(f'Sending Header: {header}: value: {value}')
                 self.send_header(header,value)
         self.end_headers()
-        
-        if content:
-            self.wfile.write(content if isinstance(content,bytes) else content.encode( 'utf-8' ) )
-            print( f'Response: {response_value}, {len(content)} bytes, {headers}' )
-        else:
-            print( f'Response: {response_value}' )
+        if err_json_response:
+            self.wfile.write(err_json_response.encode('utf-8', 'backslashreplace'))
+        ## Possible enhancement: Implement JSON response & receive in iOS client?
+        # if ok_json_response:
+        #     self.wfile.write(ok_json_response.encode('utf-8', 'replace'))
+        if content and not err_json_response:
+            self.wfile.write(content if isinstance(content,bytes) else content.encode( 'utf-8', 'backslashreplace' ) )
+        # Always log what we responded to the client with, regardless of verbosity level
+        self.eprint(f'{sanitized_content}')
+        self.log_message( 'Response: %s - %s - %s, %d bytes, %s', response_value, msg, explanation, resp_content_length if resp_content_length else 0, sanitized_headers )
+        # OLD f-string caused "%" format string errors in BaseHTTPRequestHandler.log_message()
+        #   self.log_message( f'Response: {response_value} - {msg} - {explanation}, {len(content) if content else 0} bytes, {headers}' )
         
 class RemoteStash:
     def __init__(self,args=None):
         self.args = args
-        self.verbose = args.verbose;
+        self.verbose = args.verbose
 
     def listen_and_execute(self,path = 'last'):
         '''
@@ -854,19 +1304,31 @@ class RemoteStash:
             name = f'{advertiser.get_name()} RemoteStash'
         advertiser.start_advertisement(name)
         port = advertiser.port
-        server = HTTPServer((advertiser.ip, port), RemoteStashServer)
+        # Pass in this RemoteStash instance to the server class, so it can access the self.verbose attribute
+        server = RemoteStashServer((advertiser.ip, port), self)
+        if self.verbose > 1:
+            print( f'Server object: {server}')
         proto = 'http'
         if os.path.isfile( os.path.expanduser( '~/.remotestash/remotestash-key.pem' ) ):
             proto = 'https'
-            # certificated created with
+            # certificate created with
             # Will check consistency with the certificate used on other server/app
             #  openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout remotestash-key.pem -out remotestash-cert.pem
-            server.socket = ssl.wrap_socket( server.socket,
-                                             keyfile = os.path.expanduser( '~/.remotestash/remotestash-key.pem' ),
-                                             certfile = os.path.expanduser( '~/.remotestash/remotestash-cert.pem' ),
-                                             server_side = True )
+            # Replace deprecated ssl.wrap_socket() with ssl.SSLContext.wrap_socket() for Python 3.7 and later
+            python_ver = (sys.version_info[0], sys.version_info[1])
+            if python_ver >= (3,7):
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.check_hostname = False
+                context.load_cert_chain( os.path.expanduser( '~/.remotestash/remotestash-cert.pem' ),
+                                         os.path.expanduser( '~/.remotestash/remotestash-key.pem' ) )
+                server.socket = context.wrap_socket( server.socket, server_side=True )
+            else:
+                server.socket = ssl.wrap_socket( server.socket,
+                                                 keyfile = os.path.expanduser( '~/.remotestash/remotestash-key.pem' ),
+                                                 certfile = os.path.expanduser( '~/.remotestash/remotestash-cert.pem' ),
+                                                 server_side = True )
         else:
-            print( f"Couldn't find certificate and key files, please copy the files in the certs directory into ~/.remotestash to continue")
+            print( "Couldn't find certificate and key files, please copy the files in the certs directory into ~/.remotestash to continue")
             exit(1)
             
         print(f"Starting server as '{name}' on {proto}://{advertiser.ip}:{port}, use <Ctrl-C> to stop")
@@ -912,7 +1374,7 @@ class RemoteStash:
         if 'file' in self.args and self.args.file:
             if self.args.file == '-':
                 if self.verbose:
-                    print( f'Sending to stdout' )
+                    print( 'Sending to stdout' )
                 return sys.stdout
             else:
                 if self.verbose:
@@ -926,7 +1388,7 @@ class RemoteStash:
                 return open( item.filename(), 'wb' )
             else:
                 if self.verbose:
-                    print( f'Sending to stdout' )
+                    print( 'Sending to stdout' )
                 return sys.stdout
             
     def cmd_push(self):
@@ -1022,7 +1484,7 @@ if __name__ == "__main__":
     parser.add_argument( '-c', '--content-type', help='content type' )
     parser.add_argument( '-l', '--local', action='store_true', help='use local stash' )
     parser.add_argument( '-n', '--name', help='name for service' )
-    parser.add_argument( '-v', '--verbose', action='store_true', help='verbose output' )
+    parser.add_argument( '-v', '--verbose', action='count', default=False, help='verbose output. Pass multiple times to be very verbose and display more debug info. Supports up to 5 -v flags.' )
     parser.add_argument( '-p', '--port', help='port to use if not set will use a free port' )
     parser.add_argument( '-t', '--timeout', help='timeout for searching for a RemoteStash on the network', default=5.0, type=float )
     parser.add_argument( 'file',nargs='?', help='file name to read or save, empty or - for stdout/stdin' )
